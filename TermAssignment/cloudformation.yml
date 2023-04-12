@@ -1,0 +1,492 @@
+Resources:
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-04581fbf744a7d11f
+      InstanceType: t2.micro
+      KeyName: !Ref MyKeyPair
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instance
+      VpcId: "vpc-0e90bba583010ef34"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8083
+          ToPort: 8083
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 8083
+          ToPort: 8083
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  MyKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: employee-kv
+      PublicKeyMaterial: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDKLyM6Gy5E5gwkQEmiWfdMXlUv0WWOrX44p9Zu/xN6zx2S2wI2pLZt0iWIY9Aye2zoC2KhiqdjHOigQFni7Ck3cAlrWxWH0B/0qH2tMSqZPjE84z/TvQlLVHwE+HMSD92tqrQLVGlUxwhinRDsmHWTQzukrBLzw5iuFG+/rR4s2xxHv56TlTmYpPOmCSEZSr8n6UCm41fvjNGmWXQVbsE3Zocv5rZs/0mJw/qnMZx61bXvvZn2wdm38YRpvRFIZII4wDq4Ez5bh1nixrX4mgJofosw9+/xAg0yOeTBMVJ1A5VM7DbbWL0xd8auc7pW+pHBTM8lUkflJHG1cwLByuGx vinayak abhinav@LAPTOP-P0GIQVG8
+  
+  MyDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Employee-table
+      KeySchema:
+        - AttributeName: employeeId
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: employeeId
+          AttributeType: S
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+    
+  MyS3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: "employee-cloud-bucket"
+      AccessControl: PublicRead
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+  MyBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref MyS3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "PublicReadGetObject"
+            Effect: "Allow"
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: "arn:aws:s3:::employee-cloud-bucket/*"
+  
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "Employee emails"
+      TopicName: "employee-emails-topic"
+  MyQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: message-queue
+
+
+  GetLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+
+          def lambda_handler(event, context):
+              request_body = event
+              ip_address = os.environ.get('ipAddress')
+              response = None
+              url = 'http://' + ip_address + ':8083/getAllEmployee'
+              with urllib.request.urlopen(url) as response:
+                  data = response.read().decode()
+                  print('API response:', data)
+                  return json.loads(data)
+
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Description: Get Lambda Function
+      MemorySize: 128
+      Timeout: 10
+      Role: arn:aws:iam::149521459984:role/LabRole
+      Environment:
+        Variables:
+            ipAddress: !GetAtt EC2Instance.PublicIp
+
+  PostLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+
+          def lambda_handler(event, context):
+              request_body = event
+              ip_address = os.environ.get('ipAddress')
+              api_endpoint = 'http://' + ip_address + ':8083/employee'
+              modified_request_body=json.dumps(request_body).encode('utf-8')
+
+              try:
+                  req = urllib.request.Request(api_endpoint, data=modified_request_body, method='POST', headers={'Content-Type': 'application/json'})
+                  with urllib.request.urlopen(req) as response:
+                      data = response.read().decode()
+                      return {
+                          'statusCode': response.status,
+                          'body': json.loads(data)
+                      }
+              except urllib.error.HTTPError as e:
+                  return {
+                      'statusCode': e.code,
+                      'body': json.loads(e.read().decode())
+                  }
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Description: Post Lambda Function
+      MemorySize: 128
+      Timeout: 10
+      Role: arn:aws:iam::149521459984:role/LabRole
+      Environment:
+        Variables:
+            ipAddress: !GetAtt EC2Instance.PublicIp
+      
+  UpdateLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+
+          def lambda_handler(event, context):
+              request_body = event
+              ip_address = os.environ.get('ipAddress')
+              employeeId=request_body['employeeId']
+              api_endpoint = 'http://' + ip_address + ':8083/update/employee/'+employeeId
+              del request_body['employeeId']
+              modified_request_body=json.dumps(request_body).encode('utf-8')
+
+              try:
+                  req = urllib.request.Request(api_endpoint, data=modified_request_body, method='PUT', headers={'Content-Type': 'application/json'})
+                  with urllib.request.urlopen(req) as response:
+                      data = response.read().decode(),
+                      return {
+                        'statusCode': response.status,
+                        'body': "employee updated"
+                             }
+              except urllib.error.HTTPError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': "error in updation"
+                         }
+
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Description: Update Lambda Function
+      MemorySize: 128
+      Timeout: 10
+      Role: arn:aws:iam::149521459984:role/LabRole
+      Environment:
+        Variables:
+            ipAddress: !GetAtt EC2Instance.PublicIp
+
+  DeleteLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+
+          def lambda_handler(event, context):
+              request_body = event
+              ip_address = os.environ.get('ipAddress')
+              employeeId=request_body['employeeId']
+              api_endpoint = 'http://' + ip_address +':8083/delete/employee/' + employeeId
+              try:
+                  req = urllib.request.Request(api_endpoint, method='DELETE', headers={'Content-Type': 'application/json'})
+                  with urllib.request.urlopen(req) as response:
+                      data = response.read().decode()
+                      return {
+                        'statusCode': response.status,
+                        'body': "employee deleted"
+                             }
+              except urllib.error.HTTPError as e:
+                      return {
+                        'statusCode': e.code,
+                        'body': "error in deletion"
+                             }
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      Description: Delete Lambda Function
+      MemorySize: 128
+      Timeout: 10
+      Role: arn:aws:iam::149521459984:role/LabRole
+      Environment:
+        Variables:
+            ipAddress: !GetAtt EC2Instance.PublicIp
+
+  NotifyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+
+          def handler(event, context):
+              request_body = event
+              ip_address = os.environ.get('ipAddress')
+              api_endpoint = 'http://' + ip_address + ':8083/notify'
+              modified_request_body=json.dumps(request_body).encode('utf-8')
+              try:
+                  req = urllib.request.Request(api_endpoint, data=modified_request_body, method='POST', headers={'Content-Type': 'application/json'})
+                  with urllib.request.urlopen(req) as response:
+                      data = response.read().decode()
+                      return {
+                        'statusCode': response.status,
+                        'body': json.loads(data)
+                             }
+              except urllib.error.HTTPError as e:
+                  return {
+                    'statusCode': e.code,
+                    'body': json.loads(e.read().decode())
+                         }
+      Handler: index.handler
+      Runtime: python3.8
+      Description: Notify Lambda Function
+      MemorySize: 128
+      Timeout: 10
+      Role: arn:aws:iam::149521459984:role/LabRole
+      Environment:
+        Variables:
+            ipAddress: !GetAtt EC2Instance.PublicIp
+
+
+  MyApiGateway:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: employeeGateway
+
+  MyApiResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: postEmployee
+      RestApiId: !Ref MyApiGateway
+  
+  MyApiMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref MyApiResource
+      RestApiId: !Ref MyApiGateway
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PostLambdaFunction.Arn}/invocations
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: $input.json("$")
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseTemplates:
+              application/json: $input.json('$')
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            application/json: Empty
+  
+  ApiGatewayInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt PostLambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/*"
+  
+  GetApiResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: getEmployee
+      RestApiId: !Ref MyApiGateway
+  
+  GetApiMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: GET
+      ResourceId: !Ref GetApiResource
+      RestApiId: !Ref MyApiGateway
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetLambdaFunction.Arn}/invocations
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: $input.json("$")
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseTemplates:
+              application/json: $input.json('$')
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            application/json: Empty
+  
+  GetApiGatewayInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt GetLambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/*"
+  
+  UpdateApiResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: updateEmployee
+      RestApiId: !Ref MyApiGateway
+    
+  UpdateApiMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: PUT
+      ResourceId: !Ref UpdateApiResource
+      RestApiId: !Ref MyApiGateway
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UpdateLambdaFunction.Arn}/invocations
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: $input.json("$")
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseTemplates:
+              application/json: $input.json('$')
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            application/json: Empty
+
+  UpdateApiGatewayInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt UpdateLambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/*"
+  
+  DeleteApiResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: deleteEmployee
+      RestApiId: !Ref MyApiGateway
+  
+  DeleteApiMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: DELETE
+      ResourceId: !Ref DeleteApiResource
+      RestApiId: !Ref MyApiGateway
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DeleteLambdaFunction.Arn}/invocations
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: $input.json("$")
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseTemplates:
+              application/json: $input.json('$')
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            application/json: Empty
+    
+  DeleteApiGatewayInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt DeleteLambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/*"
+  
+  NotifyApiResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: notifyEmployee
+      RestApiId: !Ref MyApiGateway
+  
+  NoifyApiMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref NotifyApiResource
+      RestApiId: !Ref MyApiGateway
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${NotifyLambdaFunction.Arn}/invocations
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: $input.json("$")
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseTemplates:
+              application/json: $input.json('$')
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            application/json: Empty
+  
+  NotifyApiGatewayInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt NotifyLambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/*"
+
+  MyDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn: MyApiMethod
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      StageName: dev
